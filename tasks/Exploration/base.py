@@ -140,7 +140,17 @@ class BaseExploration(GameUi, GeneralBattle, GeneralRoom, GeneralInvite, Replace
         # I_E_EXPLORATION_CLICK 不出现、OCR 交集为空 → 一直滑屏卡死。故进选关前无条件确保主线 tab。
         self.goto_page(pages.page_mainline)
 
+        # 章节列表可能停在任何位置，而且"手指上滑/下滑"会让列表往哪个方向滚并不总是确定：
+        # 之前只朝一个方向滑，一旦列表已经停在顶部（例如游戏/模拟器重启后回到第一章），
+        # 就会"滑 15 次列表纹丝不动 → GameStuckError"。这里改成双向扫描：
+        # 先朝一个方向滑，滑到列表尽头（连续两次读到的章节完全没变）或次数用尽后自动换另一个方向，
+        # 直到目标章节出现。这样无论目标章节在列表上方还是下方都能找到，不再依赖游戏记住上次的选中位置。
+        swipe_rules = [self.S_SWIPE_LEVEL_DOWN, self.S_SWIPE_LEVEL_UP]
+        swipe_limit_per_direction = 12
+        direction_index = 0
         swipeCount = 0
+        same_count = 0
+        last_text = None
         while 1:
             # 探索的 config
             explorationConfig = self.config.exploration
@@ -161,15 +171,37 @@ class BaseExploration(GameUi, GeneralBattle, GeneralRoom, GeneralInvite, Replace
                 continue
             if self.appear_then_click(self.I_UI_CONFIRM_SAMLL, interval=1):
                 continue
-            self.device.click_record_clear()
-            self.swipe(self.S_SWIPE_LEVEL_UP)
-            swipeCount += 1
-            debug_info = f"Swiped {swipeCount} times, current exploration level: {text1}"
-            logger.info(debug_info)
-            if swipeCount >= 15:
-                raise GameStuckError(
-                    f"Swiped too many times ({swipeCount}), seems stuck in exploration level selection"
+
+            # 连续两次读到的章节列表完全一样 → 这个方向已经滑到头（或者这个方向根本滑不动）
+            if text1 == last_text:
+                same_count += 1
+            else:
+                same_count = 0
+            last_text = text1
+
+            if same_count >= 2 or swipeCount >= swipe_limit_per_direction:
+                # 两个方向都试过了还是没找到 → 真的卡住了
+                if direction_index >= len(swipe_rules) - 1:
+                    raise GameStuckError(
+                        f"Swiped too many times ({swipe_limit_per_direction} * {len(swipe_rules)}), "
+                        f"seems stuck in exploration level selection"
+                    )
+                direction_index += 1
+                swipeCount = 0
+                same_count = 0
+                last_text = None
+                logger.info(
+                    f"Chapter list did not move, switch swipe direction to "
+                    f"{swipe_rules[direction_index].name}"
                 )
+                continue
+
+            self.device.click_record_clear()
+            self.swipe(swipe_rules[direction_index])
+            swipeCount += 1
+            debug_info = (f"Swiped {swipeCount} times ({swipe_rules[direction_index].name}), "
+                          f"current exploration level: {text1}")
+            logger.info(debug_info)
             time.sleep(1)
 
         # 选中对应章节
